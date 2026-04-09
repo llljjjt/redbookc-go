@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/mattn/go-sqlite3"
 
 	"redbookc-go/internal/account"
 	"redbookc-go/internal/engine"

@@ -144,7 +144,7 @@ func (p *Publisher) shouldSkip(acc *account.Account, jobCreatedAt time.Time) (bo
 		return false, nil
 	}
 
-	intervalMinutes := acc.IntervalMin + time.Now().UnixNano()%int64(diff)
+	intervalMinutes := acc.IntervalMin + int(time.Now().UnixNano()%int64(diff))
 	cooldown := time.Duration(intervalMinutes) * time.Minute
 
 	if time.Since(*acc.LastPostAt) < cooldown {

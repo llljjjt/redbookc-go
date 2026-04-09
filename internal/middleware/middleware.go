@@ -1,8 +1,13 @@
 package middleware
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,23 +49,35 @@ func AuthRequired() gin.HandlerFunc {
 	}
 }
 
-// validateToken validates the token and returns the user ID
-// In production, implement proper JWT/session validation
+// validateToken validates the token and returns the user ID.
+// Token format: "user_<user_id>_<hmac_sha256_signature>"
+// The signature is HMAC-SHA256 of "user_<user_id>" using the server secret.
 func validateToken(token string) (int64, error) {
-	// Simple token format for demo: "user_<user_id>_<secret>"
-	// In production, use proper JWT validation with secret key
-	if strings.HasPrefix(token, "user_") {
-		parts := strings.Split(token, "_")
-		if len(parts) >= 2 {
-			// Extract user ID (in real impl, verify signature)
-			// For demo, we accept tokens like "user_123_secret"
-			// The actual validation should be more robust
-			return 1, nil // default user for demo
-		}
+	if token == "" {
+		return 0, fmt.Errorf("empty token")
 	}
-	// Accept any non-empty token for demo purposes
-	// TODO: replace with proper JWT validation
-	return 1, nil
+	parts := strings.Split(token, "_")
+	if len(parts) < 3 || parts[0] != "user" {
+		return 0, fmt.Errorf("invalid token format")
+	}
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid user id in token")
+	}
+	// Verify HMAC signature
+	expectedSig := computeHMAC(strings.Join(parts[:2], "_"), os.Getenv("TOKEN_SECRET"))
+	signature := strings.Join(parts[2:], "_")
+	if signature != expectedSig {
+		return 0, fmt.Errorf("invalid token signature")
+	}
+	return userID, nil
+}
+
+// computeHMAC computes HMAC-SHA256 and returns hex-encoded string.
+func computeHMAC(msg, key string) string {
+	h := hmac.New(sha256.New, []byte(key))
+	h.Write([]byte(msg))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // APIKeyAuth middleware for API key based authentication

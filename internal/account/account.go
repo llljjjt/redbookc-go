@@ -13,15 +13,15 @@ type Account struct {
 	Name              string     `json:"name"`
 	ProfileDir        string     `json:"profile_dir"`
 	AccountType       string     `json:"account_type"` // "brand" or "agency"
-	ChromeUserDataDir string     `json:"chrome_user_data_dir"`
-	CookiesJSON       string     `json:"cookies_json"`
+	ChromeUserDataDir string     `json:"-"`
+	CookiesJSON       string     `json:"-"`
 	Status            string     `json:"status"`
 	IntervalMin       int        `json:"interval_min"` // minimum interval in minutes
 	IntervalMax       int        `json:"interval_max"` // maximum interval in minutes
 	DailyLimit        int        `json:"daily_limit"`
-	ClaudeAPIKey      string     `json:"claude_api_key"`
-	WebhookURL        string     `json:"webhook_url"`
-	LastPostAt        *time.Time `json:"last_post_at"`
+	ClaudeAPIKey      string     `json:"-"`
+	WebhookURL        string     `json:"webhook_url,omitempty"`
+	LastPostAt        *time.Time `json:"last_post_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 }
 

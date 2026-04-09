@@ -21,12 +21,12 @@ func NewGenerator(db *sql.DB) *Generator {
 }
 
 // Generate generates RedBook content from a signal
-func (g *Generator) Generate(ctx context.Context, sig *signal.Signal) (string, error) {
+func (g *Generator) Generate(ctx context.Context, sig *signal.Signal, accountID int64) (string, error) {
 	prompt := g.BuildPrompt(sig)
 
 	// TODO: 调用 Claude API 生成内容
 	// 这里先用模板方法，后续接入 anthropic SDK
-	content, err := g.callClaude(ctx, prompt, sig)
+	content, err := g.callClaude(ctx, prompt, sig, accountID)
 	if err != nil {
 		return "", fmt.Errorf("failed to call Claude: %w", err)
 	}
@@ -66,10 +66,10 @@ func (g *Generator) BuildPrompt(sig *signal.Signal) string {
 }
 
 // callClaude 调用 Claude API
-func (g *Generator) callClaude(ctx context.Context, prompt string, sig *signal.Signal) (string, error) {
+func (g *Generator) callClaude(ctx context.Context, prompt string, sig *signal.Signal, accountID int64) (string, error) {
 	// 获取账号配置的 API Key
 	var apiKey string
-	err := g.db.QueryRow(`SELECT claude_api_key FROM accounts LIMIT 1`).Scan(&apiKey)
+	err := g.db.QueryRow(`SELECT claude_api_key FROM accounts WHERE id = ? LIMIT 1`, accountID).Scan(&apiKey)
 	if err != nil && err != sql.ErrNoRows {
 		return "", fmt.Errorf("failed to get API key: %w", err)
 	}

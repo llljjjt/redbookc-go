@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"log"
 	"net/http"
 	"os"
@@ -427,9 +428,9 @@ func webhookCallback(c *gin.Context, wh *webhook.WebhookClient) {
 	// Validate webhook secret if configured
 	webhookSecret := c.GetHeader("X-Webhook-Secret")
 	if webhookSecret != "" {
-		// In production, compare using constant-time comparison
+		// Use constant-time comparison to prevent timing attacks
 		expectedSecret := getEnv("WEBHOOK_SECRET", "")
-		if webhookSecret != expectedSecret {
+		if subtle.ConstantTimeCompare([]byte(webhookSecret), []byte(expectedSecret)) != 1 {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook secret"})
 			return
 		}

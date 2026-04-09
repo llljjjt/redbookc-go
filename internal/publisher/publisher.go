@@ -280,7 +280,13 @@ func (p *Publisher) shouldSkip(accountID int64, jobCreatedAt time.Time) (bool, e
 
 	// Also check last_post_at interval
 	if acc.LastPostAt != nil {
-		intervalMinutes := acc.IntervalMin + rand.Intn(acc.IntervalMax-acc.IntervalMin)
+		diff := acc.IntervalMax - acc.IntervalMin
+		var intervalMinutes int
+		if diff <= 0 {
+			intervalMinutes = acc.IntervalMin
+		} else {
+			intervalMinutes = acc.IntervalMin + rand.Intn(diff)
+		}
 		nextPostAt := acc.LastPostAt.Add(time.Duration(intervalMinutes) * time.Minute)
 		if time.Now().Before(nextPostAt) {
 			fmt.Printf("[publisher] account %d waiting for interval (%d minutes)\n",

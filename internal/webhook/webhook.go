@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -50,6 +52,48 @@ func (c *WebhookClient) SetBaseURL(url string) {
 	c.baseURL = url
 }
 
+// isValidWebhookURL validates the webhook URL to prevent SSRF attacks.
+// Returns false if URL is not HTTPS or points to an internal/private address.
+func isValidWebhookURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	// Must be HTTPS
+	if u.Scheme != "https" {
+		return false
+	}
+	// Disallow internal/private addresses
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return false
+	}
+	if strings.HasPrefix(host, "192.168.") ||
+		strings.HasPrefix(host, "10.") ||
+		strings.HasPrefix(host, "172.16.") ||
+		strings.HasPrefix(host, "172.17.") ||
+		strings.HasPrefix(host, "172.18.") ||
+		strings.HasPrefix(host, "172.19.") ||
+		strings.HasPrefix(host, "172.20.") ||
+		strings.HasPrefix(host, "172.21.") ||
+		strings.HasPrefix(host, "172.22.") ||
+		strings.HasPrefix(host, "172.23.") ||
+		strings.HasPrefix(host, "172.24.") ||
+		strings.HasPrefix(host, "172.25.") ||
+		strings.HasPrefix(host, "172.26.") ||
+		strings.HasPrefix(host, "172.27.") ||
+		strings.HasPrefix(host, "172.28.") ||
+		strings.HasPrefix(host, "172.29.") ||
+		strings.HasPrefix(host, "172.30.") ||
+		strings.HasPrefix(host, "172.31.") ||
+		strings.HasPrefix(host, "169.254.") || // link-local
+		strings.HasPrefix(host, "fc00:") ||
+		strings.HasPrefix(host, "fe80:") { // link-local IPv6
+		return false
+	}
+	return true
+}
+
 // SendReviewNotification sends a review notification for a job
 func (c *WebhookClient) SendReviewNotification(accountID int64, jobID int64, content string) error {
 	// Get account info
@@ -63,6 +107,11 @@ func (c *WebhookClient) SendReviewNotification(accountID int64, jobID int64, con
 
 	if !webhookURL.Valid || webhookURL.String == "" {
 		return fmt.Errorf("account %d has no webhook_url configured", accountID)
+	}
+
+	// SSRF protection: validate webhook URL
+	if !isValidWebhookURL(webhookURL.String) {
+		return fmt.Errorf("invalid webhook URL: must be https and not internal")
 	}
 
 	// Get job info for image path

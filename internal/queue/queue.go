@@ -239,6 +239,25 @@ func (q *Queue) GetJobByID(jobID int64) (*Job, error) {
 	return &job, nil
 }
 
+// GetPendingJobsForPublish returns jobs that are ready to be published
+// (status = 'generated' and publish_mode = 'auto')
+func (q *Queue) GetPendingJobsForPublish() ([]*Job, error) {
+	rows, err := q.db.Query(`
+		SELECT id, account_id, signal_id, content, image_path, publish_mode, status,
+		       publish_at, approved_at, published_at, error_message, retry_count, created_at
+		FROM jobs
+		WHERE status = ? AND publish_mode = ? AND (publish_at IS NULL OR publish_at <= NOW())
+		ORDER BY created_at ASC
+		LIMIT 10
+	`, StatusGenerated, "auto")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query jobs for publish: %w", err)
+	}
+	defer rows.Close()
+
+	return scanJobs(rows)
+}
+
 // GetPendingJobsAll returns all pending jobs across all accounts
 func (q *Queue) GetPendingJobsAll() ([]*Job, error) {
 	rows, err := q.db.Query(`

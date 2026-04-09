@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/playwright-community/playwright-go"
 
 	"redbookc-go/internal/account"
 	"redbookc-go/internal/queue"
@@ -133,6 +134,8 @@ type Publisher struct {
 	db           *sql.DB
 	accountMgr   *account.AccountManager
 	queueMgr     *queue.Queue
+	pw           *playwright.Playwright
+	antiDetectScript string
 	interval     time.Duration
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
@@ -142,12 +145,23 @@ type Publisher struct {
 
 // NewPublisher creates a new publisher
 func NewPublisher(db *sql.DB) *Publisher {
+	// 尝试启动 Playwright
+	var pw *playwright.Playwright
+	var err error
+	pw, err = playwright.New()
+	if err != nil {
+		fmt.Printf("[publisher] warning: failed to initialize playwright: %v\n", err)
+		pw = nil
+	}
+
 	return &Publisher{
-		db:         db,
-		accountMgr: account.NewAccountManager(db),
-		queueMgr:   queue.NewQueue(db),
-		interval:   5 * time.Minute,
-		stopCh:     make(chan struct{}),
+		db:              db,
+		accountMgr:      account.NewAccountManager(db),
+		queueMgr:        queue.NewQueue(db),
+		pw:              pw,
+		antiDetectScript: AntiDetectScript,
+		interval:        5 * time.Minute,
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -180,6 +194,38 @@ func (p *Publisher) Stop() {
 
 	close(p.stopCh)
 	p.wg.Wait()
+}
+
+// PublishJob publishes a specific job immediately (used by workflow)
+func (p *Publisher) PublishJob(job *queue.Job) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	acc, err := p.accountMgr.Get(job.AccountID)
+	if err != nil {
+		return fmt.Errorf("failed to get account: %w", err)
+	}
+
+	// 检查是否在冷却中
+	skip, err := p.shouldSkip(job.AccountID, job.CreatedAt)
+	if err != nil {
+		fmt.Printf("[publisher] shouldSkip error: %v\n", err)
+	}
+	if skip {
+		return fmt.Errorf("account %d in cooldown", job.AccountID)
+	}
+
+	// 执行发布
+	if err := p.postJob(ctx, job); err != nil {
+		p.queueMgr.UpdateStatusWithError(job.ID, queue.StatusFailed, err.Error())
+		p.queueMgr.IncrementRetry(job.ID)
+		return err
+	}
+
+	p.queueMgr.MarkPublished(job.ID)
+	p.accountMgr.UpdateLastPostAt(acc.ID)
+	p.incrementDailyStats(acc.ID)
+	return nil
 }
 
 func (p *Publisher) runLoop(ctx context.Context) {
@@ -302,26 +348,21 @@ func (p *Publisher) shouldSkip(accountID int64, jobCreatedAt time.Time) (bool, e
 func (p *Publisher) postJob(ctx context.Context, job *queue.Job) error {
 	fmt.Printf("[publisher] posting job %d for account %d\n", job.ID, job.AccountID)
 
+	// 检查 Playwright 是否可用
+	if p.pw == nil {
+		// Playwright 不可用，尝试重新初始化
+		var err error
+		p.pw, err = playwright.New()
+		if err != nil {
+			return fmt.Errorf("playwright not available: %w", err)
+		}
+	}
+
 	// 获取账号信息
 	acc, err := p.accountMgr.Get(job.AccountID)
 	if err != nil {
 		return fmt.Errorf("failed to get account: %w", err)
 	}
-
-	// 检查 Chrome Profile
-	if acc.ChromeUserDataDir == "" {
-		return fmt.Errorf("Chrome profile not configured for account %d", job.AccountID)
-	}
-	if !dirExists(acc.ChromeUserDataDir) {
-		return fmt.Errorf("Chrome profile directory not found: %s", acc.ChromeUserDataDir)
-	}
-
-	// TODO: 初始化 Playwright 浏览器
-	// 这里需要动态导入 playwright 以避免循环依赖
-	// browser, err := p.initBrowser(acc)
-	// if err != nil {
-	//     return fmt.Errorf("failed to init browser: %w", err)
-	// }
 
 	// 解析文案
 	parts := parseContent(job.Content)
@@ -331,39 +372,140 @@ func (p *Publisher) postJob(ctx context.Context, job *queue.Job) error {
 
 	fmt.Printf("[publisher] parsed - title: %s, body: %s, tags: %s\n", title, body, tags)
 
-	// TODO: Playwright 操作步骤
-	// 1. 加载 Chrome Profile (使用 --user-data-dir)
-	// 2. 注入反检测脚本
-	// 3. 打开小红书创作者后台 https://creator.xiaohongshu.com
-	// 4. 上传图片 (如果有)
-	// 5. 填写文案和标题
-	// 6. 添加话题标签
-	// 7. 点击发布
-	// 8. 等待确认弹窗
-	// 9. 关闭浏览器
+	// 1. 启动 Chromium，加载 Chrome Profile
+	browser, err := p.launchBrowser(acc.ChromeUserDataDir)
+	if err != nil {
+		return fmt.Errorf("启动浏览器失败: %w", err)
+	}
+	defer func() {
+		if err := browser.Close(); err != nil {
+			fmt.Printf("[publisher] browser close error: %v\n", err)
+		}
+	}()
 
-	// 模拟发布成功
+	// 2. 创建新页面
+	page, err := browser.NewPage()
+	if err != nil {
+		return fmt.Errorf("创建页面失败: %w", err)
+	}
+	defer page.Close()
+
+	// 3. 注入反检测脚本
+	if p.antiDetectScript != "" {
+		_, err = page.AddInitScript(&playwright.BrowserContextAddInitScriptOptions{
+			Script: playwright.String(p.antiDetectScript),
+		})
+		if err != nil {
+			fmt.Printf("[publisher] addInitScript warning: %v\n", err)
+		}
+	}
+
+	// 4. 导航到发布页面
+	if _, err := page.Goto("https://creator.xiaohongshu.com/publish/publish"); err != nil {
+		return fmt.Errorf("导航到发布页失败: %w", err)
+	}
+
+	// 等待页面加载
+	page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{State: playwright.LoadStateNetworkIdle})
+
+	// 5. 如果有图片，上传图片
+	if job.ImagePath != "" && fileExists(job.ImagePath) {
+		fmt.Printf("[publisher] uploading image: %s\n", job.ImagePath)
+		// 点击上传按钮
+		if err := page.Locator(".upload-btn").Click(); err != nil {
+			fmt.Printf("[publisher] upload-btn click warning: %v\n", err)
+		}
+		// 使用文件输入框上传
+		if err := page.Locator("input[type=file]").SetInputFiles(job.ImagePath); err != nil {
+			return fmt.Errorf("上传图片失败: %w", err)
+		}
+		// 等待上传完成
+		page.Locator(".img-item").WaitFor(&playwright.LocatorWaitForOptions{Timeout: playwright.Float(30 * 1000)})
+		fmt.Printf("[publisher] image uploaded\n")
+	}
+
+	// 6. 填写正文内容
+	if body != "" {
+		if err := page.Locator(".editor-input").Click(); err != nil {
+			fmt.Printf("[publisher] editor-input click warning: %v\n", err)
+		}
+		// 先清空内容
+		page.Locator(".editor-input").Press("Control+a")
+		page.Locator(".editor-input").Fill("")
+		page.Locator(".editor-input").Fill(body)
+	}
+
+	// 7. 填写标题
+	if title != "" {
+		if err := page.Locator(".title-input").Click(); err != nil {
+			fmt.Printf("[publisher] title-input click warning: %v\n", err)
+		}
+		page.Locator(".title-input").Fill(title)
+	}
+
+	// 8. 填写标签
+	if tags != "" {
+		// 点击标签输入框并填入标签
+		if err := page.Locator(".tag-input").Click(); err != nil {
+			fmt.Printf("[publisher] tag-input click warning: %v\n", err)
+		}
+		page.Locator(".tag-input").Fill(tags)
+		page.Locator(".tag-input").Press("Enter")
+	}
+
+	// 9. 随机延迟 2-5 秒（模拟人类行为）
+	time.Sleep(time.Duration(2+rand.Intn(4)) * time.Second)
+
+	// 10. 点击发布按钮
+	fmt.Printf("[publisher] clicking publish button\n")
+	if err := page.Locator(".publish-btn").Click(); err != nil {
+		return fmt.Errorf("点击发布按钮失败: %w", err)
+	}
+
+	// 11. 等待发布成功确认
+	_, err = page.Locator(".success-toast").WaitFor(&playwright.LocatorWaitForOptions{Timeout: playwright.Float(60 * 1000)})
+	if err != nil {
+		// 如果没有找到成功提示，检查是否有错误提示
+		if _, errErr := page.Locator(".error-toast").WaitFor(&playwright.LocatorWaitForOptions{Timeout: playwright.Float(5 * 1000)}); errErr == nil {
+			return fmt.Errorf("发布失败：收到错误提示")
+		}
+		return fmt.Errorf("等待发布成功确认失败: %w", err)
+	}
+
 	fmt.Printf("[publisher] job %d published successfully\n", job.ID)
 	return nil
 }
 
-// initBrowser 初始化 Playwright 浏览器
-func (p *Publisher) initBrowser(acc *account.Account) (interface{}, error) {
-	// TODO: 使用 playwright 初始化浏览器
-	// import "github.com/playwright/test"
-	//
-	// browser, err := playwright.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-	//     Headless: false,
-	//     Args: []string{
-	//         "--user-data-dir=" + acc.ChromeUserDataDir,
-	//         "--disable-blink-features=AutomationControlled",
-	//         "--no-sandbox",
-	//         "--disable-setuid-sandbox",
-	//         "--disable-dev-shm-usage",
-	//     },
-	// })
-	// return browser, err
-	return nil, nil
+// launchBrowser 启动 Chromium 浏览器
+func (p *Publisher) launchBrowser(userDataDir string) (playwright.Browser, error) {
+	if p.pw == nil {
+		return nil, fmt.Errorf("playwright not initialized")
+	}
+
+	// 确保用户数据目录存在
+	if userDataDir != "" && !dirExists(userDataDir) {
+		return nil, fmt.Errorf("Chrome profile directory not found: %s", userDataDir)
+	}
+
+	var launchOpts playwright.BrowserTypeLaunchOptions
+	launchOpts.Headless = playwright.Bool(true)
+	launchOpts.Args = []string{
+		"--disable-blink-features=AutomationControlled",
+		"--disable-dev-shm-usage",
+		"--no-sandbox",
+		"--disable-setuid-sandbox",
+		"--disable-extensions",
+		"--disable-plugins",
+	}
+	if userDataDir != "" {
+		launchOpts.UserDataDir = playwright.String(userDataDir)
+	}
+
+	browser, err := p.pw.Chromium.Launch(launchOpts)
+	if err != nil {
+		return nil, fmt.Errorf("chromium launch failed: %w", err)
+	}
+	return browser, nil
 }
 
 // parseContent 解析生成的文案
@@ -415,4 +557,13 @@ func dirExists(path string) bool {
 		return false
 	}
 	return info.IsDir()
+}
+
+// fileExists 检查文件是否存在
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }

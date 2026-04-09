@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"redbookc-go/internal/stats"
 	"redbookc-go/internal/webhook"
 	"redbookc-go/pkg/database"
+	"redbookc-go/pkg/signal"
 )
 
 func main() {
@@ -49,9 +52,13 @@ func main() {
 	statsMgr := stats.NewStats(db)
 
 	// 4. Start background workers
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go eng.Start(ctx)
 	go pub.Start(ctx)
+
+	// 5. Start content generation workflow
+	go startWorkflow(ctx, db, eng, gen, q, pub, wh)
 
 	// 5. Setup Gin router
 	r := gin.Default()
@@ -468,6 +475,84 @@ func getAccountStats(c *gin.Context, s *stats.Stats) {
 		return
 	}
 	c.JSON(http.StatusOK, accountStats)
+}
+
+// === Content Generation Workflow ===
+
+// startWorkflow 启动内容生成工作流：定期检查待生成的任务，调用 Generator 生成文案
+func startWorkflow(ctx context.Context, db *sql.DB, eng *engine.Engine, gen *generator.Generator, q *queue.Queue, pub *publisher.Publisher, wh *webhook.WebhookClient) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// 获取所有待生成的任务（status = pending 且 content 为空）
+			jobs, err := q.GetPendingJobsAll()
+			if err != nil {
+				fmt.Printf("[workflow] get pending jobs error: %v\n", err)
+				continue
+			}
+
+			for _, job := range jobs {
+				// 跳过已有内容的任务（人工编辑模式等）
+				if job.Content != "" {
+					continue
+				}
+
+				// 获取关联的信号
+				var sig signal.Signal
+				if job.SignalID > 0 {
+					s, err := eng.GetSignal(job.SignalID)
+					if err != nil {
+						fmt.Printf("[workflow] get signal %d error: %v\n", job.SignalID, err)
+						q.UpdateStatusWithError(job.ID, queue.StatusFailed, fmt.Sprintf("signal not found: %v", err))
+						continue
+					}
+					sig = *s
+				} else {
+					// 没有关联信号，跳过（需要外部注入内容）
+					continue
+				}
+
+				// 更新状态为生成中
+				q.UpdateStatus(job.ID, queue.StatusGenerating)
+
+				// 调用 Generator 生成文案
+				content, err := gen.Generate(ctx, &sig, job.AccountID)
+				if err != nil {
+					fmt.Printf("[workflow] generate content error: %v\n", err)
+					q.UpdateStatusWithError(job.ID, queue.StatusFailed, fmt.Sprintf("generation failed: %v", err))
+					continue
+				}
+
+				// 更新任务内容
+				q.UpdateContent(job.ID, content)
+				q.UpdateStatus(job.ID, queue.StatusGenerated)
+
+				// 根据 publish_mode 决定下一步
+				if job.PublishMode == "auto" {
+					// 全自动模式：触发发布
+					fmt.Printf("[workflow] job %d generated (auto), triggering publish\n", job.ID)
+					go func(j *queue.Job) {
+						if err := pub.PublishJob(j); err != nil {
+							fmt.Printf("[workflow] publish error: %v\n", err)
+						}
+					}(job)
+				} else {
+					// 人工审核模式：发送 Webhook 通知
+					fmt.Printf("[workflow] job %d generated (review), sending webhook\n", job.ID)
+					go func(j *queue.Job) {
+						if err := wh.SendReviewNotification(j.AccountID, j.ID, content); err != nil {
+							fmt.Printf("[workflow] webhook error: %v\n", err)
+						}
+					}(job)
+				}
+			}
+		}
+	}
 }
 
 // === Helpers ===

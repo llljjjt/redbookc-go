@@ -1,32 +1,70 @@
 package generator
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"redbookc-go/pkg/signal"
 )
 
+// ClaudeRequest is the request body for Claude Messages API
+type ClaudeRequest struct {
+	Model     string          `json:"model"`
+	MaxTokens int             `json:"max_tokens"`
+	Messages  []ClaudeMessage `json:"messages"`
+}
+
+// ClaudeMessage is a single message in Claude API request
+type ClaudeMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ClaudeResponse is the response from Claude Messages API
+type ClaudeResponse struct {
+	Content []ClaudeContent `json:"content"`
+	Error   *ClaudeError   `json:"error,omitempty"`
+}
+
+// ClaudeContent is the text content from Claude response
+type ClaudeContent struct {
+	Text string `json:"text"`
+}
+
+// ClaudeError is an error returned by Claude API
+type ClaudeError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
 // Generator generates RedBook (小红书) content using Claude
 type Generator struct {
-	db *sql.DB
+	db         *sql.DB
+	httpClient *http.Client
 }
 
 // NewGenerator creates a new content generator
 func NewGenerator(db *sql.DB) *Generator {
-	return &Generator{db: db}
+	return &Generator{
+		db: db,
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+	}
 }
 
 // Generate generates RedBook content from a signal
 func (g *Generator) Generate(ctx context.Context, sig *signal.Signal, accountID int64) (string, error) {
 	prompt := g.BuildPrompt(sig)
 
-	// TODO: 调用 Claude API 生成内容
-	// 这里先用模板方法，后续接入 anthropic SDK
-	content, err := g.callClaude(ctx, prompt, sig, accountID)
+	// 调用 Claude API 生成内容
+	content, err := g.callClaude(ctx, accountID, prompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to call Claude: %w", err)
 	}
@@ -66,32 +104,85 @@ func (g *Generator) BuildPrompt(sig *signal.Signal) string {
 }
 
 // callClaude 调用 Claude API
-func (g *Generator) callClaude(ctx context.Context, prompt string, sig *signal.Signal, accountID int64) (string, error) {
+func (g *Generator) callClaude(ctx context.Context, accountID int64, prompt string) (string, error) {
 	// 获取账号配置的 API Key
 	var apiKey string
-	err := g.db.QueryRow(`SELECT claude_api_key FROM accounts WHERE id = ? LIMIT 1`, accountID).Scan(&apiKey)
+	err := g.db.QueryRow(`SELECT claude_api_key FROM accounts WHERE id = ?`, accountID).Scan(&apiKey)
 	if err != nil && err != sql.ErrNoRows {
 		return "", fmt.Errorf("failed to get API key: %w", err)
 	}
 
 	// 如果没有配置 API Key，使用模拟内容
 	if apiKey == "" {
-		return g.fallbackGenerate(sig), nil
+		return g.fallbackGenerate(prompt), nil
 	}
 
-	// TODO: 接入 Anthropic SDK
-	// client := anthropic.NewClient(apiKey)
-	// resp, err := client.Messages.New(ctx, &anthropic.MessageNewParams{...})
-	// return resp.Content[0].Text, err
+	// 构建请求
+	reqBody := ClaudeRequest{
+		Model:     "claude-haiku-4-5",
+		MaxTokens: 500,
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
 
-	// 临时使用模拟
-	return g.fallbackGenerate(sig), nil
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// 发送请求
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Claude API请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Claude API returned status %d", resp.StatusCode)
+	}
+
+	// 解析响应
+	var claudeResp ClaudeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&claudeResp); err != nil {
+		return "", fmt.Errorf("解析Claude响应失败: %w", err)
+	}
+
+	if claudeResp.Error != nil {
+		return "", fmt.Errorf("Claude API错误: %s - %s", claudeResp.Error.Type, claudeResp.Error.Message)
+	}
+
+	if len(claudeResp.Content) == 0 {
+		return "", fmt.Errorf("Claude返回空内容")
+	}
+
+	return claudeResp.Content[0].Text, nil
 }
 
 // fallbackGenerate 当没有 API Key 时生成模拟内容
-func (g *Generator) fallbackGenerate(sig *signal.Signal) string {
-	// 从标题提取关键词
-	keywords := extractKeywords(sig.Title)
+func (g *Generator) fallbackGenerate(prompt string) string {
+	// 从 prompt 提取原始标题（简单方式：取第二行 "标题：" 后的内容）
+	lines := strings.Split(prompt, "\n")
+	var title string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "标题：") {
+			title = strings.TrimPrefix(line, "标题：")
+			break
+		}
+	}
+	if title == "" {
+		title = "今日分享"
+	}
+
+	keywords := extractKeywords(title)
 	tags := []string{
 		"#" + pickTag(keywords),
 		"#生活分享",
@@ -101,7 +192,7 @@ func (g *Generator) fallbackGenerate(sig *signal.Signal) string {
 	return fmt.Sprintf(`标题：%s
 正文：%s %s ✨
 标签：%s`,
-		truncateString(sig.Title, 20),
+		truncateString(title, 20),
 		keywords,
 		getRandomEmoji(),
 		strings.Join(tags, " "),
@@ -110,7 +201,6 @@ func (g *Generator) fallbackGenerate(sig *signal.Signal) string {
 
 // extractKeywords 从标题提取关键词
 func extractKeywords(title string) string {
-	// 简单分词：去掉常见停用词
 	stopWords := []string{"的", "了", "是", "在", "和", "与", "对", "为", "有", "我", "你", "他", "她", "它"}
 	words := strings.Fields(title)
 	var result []string
@@ -129,7 +219,6 @@ func extractKeywords(title string) string {
 	if len(result) == 0 {
 		return title
 	}
-	// 取前3个关键词
 	if len(result) > 3 {
 		result = result[:3]
 	}
@@ -159,7 +248,6 @@ func pickTag(keyword string) string {
 // getRandomEmoji 返回随机 emoji
 func getRandomEmoji() string {
 	emojis := []string{"💖", "✨", "🌟", "💫", "🔥", "💕", "🌈", "🍀", "💯", "🙌"}
-	// 使用时间作为简单随机种子
 	return emojis[time.Now().UnixNano()%int64(len(emojis))]
 }
 

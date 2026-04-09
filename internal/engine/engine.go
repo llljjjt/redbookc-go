@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"redbookc-go/pkg/signal"
 )
 
 // RSSItem represents a single item in an RSS feed
@@ -46,11 +48,12 @@ type Engine struct {
 	wg        sync.WaitGroup
 	running   bool
 	mu        sync.Mutex
+	feeds     []string // RSS Feed URL 列表
 }
 
 // NewEngine creates a new RSS engine
 func NewEngine(db *sql.DB) *Engine {
-	return &Engine{
+	e := &Engine{
 		db: db,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -60,7 +63,67 @@ func NewEngine(db *sql.DB) *Engine {
 		},
 		interval: 15 * time.Minute,
 		stopCh:   make(chan struct{}),
+		feeds:    getDefaultFeeds(),
 	}
+	// 尝试从数据库加载配置的 RSS URL
+	if err := e.loadFeedsFromDB(); err != nil {
+		fmt.Printf("[engine] loadFeedsFromDB warning: %v\n", err)
+	}
+	return e
+}
+
+// getDefaultFeeds 返回默认的 RSS Feed 列表
+func getDefaultFeeds() []string {
+	return []string{
+		// 可以添加实际的微信公众号 RSS 地址
+		// 示例：腾讯科技、极客公园等
+		"https://rss.feedsportal.com/c/34798/f/689521/index.rss",
+	}
+}
+
+// loadFeedsFromDB 从数据库读取配置的 RSS URL
+func (e *Engine) loadFeedsFromDB() error {
+	rows, err := e.db.Query(`SELECT DISTINCT rss_url FROM accounts WHERE rss_url IS NOT NULL AND rss_url != ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err == nil && url != "" {
+			e.feeds = append(e.feeds, url)
+		}
+	}
+	return nil
+}
+
+// GetSignal returns a signal by ID
+func (e *Engine) GetSignal(id int64) (*signal.Signal, error) {
+	var s signal.Signal
+	var url, content sql.NullString
+	var usedAt sql.NullTime
+
+	err := e.db.QueryRow(`
+		SELECT id, source, title, url, content, fetched_at, used_at
+		FROM signals WHERE id = ?
+	`, id).Scan(&s.ID, &s.Source, &s.Title, &url, &content, &s.FetchedAt, &usedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("signal not found: %d", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if url.Valid {
+		s.URL = url.String
+	}
+	if content.Valid {
+		s.Content = content.String
+	}
+	if usedAt.Valid {
+		s.UsedAt = &usedAt.Time
+	}
+	return &s, nil
 }
 
 // Start starts the RSS polling engine
@@ -117,12 +180,10 @@ func (e *Engine) runLoop(ctx context.Context) {
 
 // Poll fetches RSS feeds and creates signals
 func (e *Engine) Poll() error {
-	// TODO: 从 accounts 表读取配置的 RSS feed URL
-	// 目前硬编码微信公众号 RSS 示例
-	feeds := []string{
-		// 微信公众号 RSS 示例 (使用第三方 RSS 服务)
-		// "https://rsshub.app/wechat/mp/q6b9e0d2e9f1c4a7b3d5e8f2a1c9d4e6",
-	}
+	e.mu.Lock()
+	feeds := make([]string, len(e.feeds))
+	copy(feeds, e.feeds)
+	e.mu.Unlock()
 
 	for _, feedURL := range feeds {
 		if err := e.FetchWechatRSS(feedURL); err != nil {

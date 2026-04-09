@@ -110,6 +110,19 @@ func (q *Queue) UpdateStatus(jobID int64, status string) error {
 	return nil
 }
 
+// UpdateContent updates the content of a job
+func (q *Queue) UpdateContent(jobID int64, content string) error {
+	result, err := q.db.Exec(`UPDATE jobs SET content = ? WHERE id = ?`, content, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to update job content: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("job not found: %d", jobID)
+	}
+	return nil
+}
+
 // UpdateStatusWithError updates job status and error message
 func (q *Queue) UpdateStatusWithError(jobID int64, status string, errMsg string) error {
 	result, err := q.db.Exec(`

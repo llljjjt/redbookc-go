@@ -277,7 +277,7 @@ func (am *AccountManager) CanPost(accountID int64) (bool, error) {
 	if acc.LastPostAt != nil {
 		intervalMinutes := acc.IntervalMin + (acc.IntervalMax-acc.IntervalMin)/2
 		cooldown := time.Duration(intervalMinutes) * time.Minute
-		if now.Sub(acc.LastPostAt.Time) < cooldown {
+		if now.Sub(*acc.LastPostAt) < cooldown {
 			return false, fmt.Errorf("account in cooldown period")
 		}
 	}

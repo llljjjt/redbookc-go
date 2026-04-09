@@ -246,7 +246,7 @@ func (q *Queue) GetPendingJobsForPublish() ([]*Job, error) {
 		SELECT id, account_id, signal_id, content, image_path, publish_mode, status,
 		       publish_at, approved_at, published_at, error_message, retry_count, created_at
 		FROM jobs
-		WHERE status = ? AND publish_mode = ? AND (publish_at IS NULL OR publish_at <= NOW())
+		WHERE status = ? AND publish_mode = ? AND (publish_at IS NULL OR publish_at <= datetime('now'))
 		ORDER BY created_at ASC
 		LIMIT 10
 	`, StatusGenerated, "auto")

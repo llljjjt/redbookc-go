@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mattn/go-sqlite3"
 
 	"redbookc-go/internal/account"
 	"redbookc-go/internal/engine"
@@ -36,20 +35,20 @@ func main() {
 	dbPath := filepath.Join(homeDir, ".redbookc-go", "data.db")
 
 	// 2. Initialize database
-	db, err := database.InitDB(dbPath)
-	if err != nil {
+	if err := database.InitDB(dbPath); err != nil {
 		log.Fatal("failed to init database: ", err)
 	}
 	defer database.CloseDB()
+	db := database.GetDB()
 
 	// 3. Initialize modules
 	accMgr := account.NewAccountManager(db)
 	q := queue.NewQueue(db)
 	gen := generator.NewGenerator(db)
-	pub := publisher.NewPublisher(db)
+	pub := publisher.NewPublisher(db, accMgr, q)
 	wh := webhook.NewWebhookClient(db)
 	eng := engine.NewEngine(db)
-	statsMgr := stats.NewStats(db)
+	statsMgr := stats.NewStatsManager(db)
 
 	// 4. Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,7 +88,7 @@ func setupRoutes(
 	gen *generator.Generator,
 	pub *publisher.Publisher,
 	wh *webhook.WebhookClient,
-	statsMgr *stats.Stats,
+	statsMgr *stats.StatsManager,
 ) {
 	api := r.Group("/api")
 	api.Use(middleware.AuthRequired())
@@ -453,7 +452,7 @@ func webhookCallback(c *gin.Context, wh *webhook.WebhookClient) {
 
 // === Stats Handlers ===
 
-func getStats(c *gin.Context, s *stats.Stats) {
+func getStats(c *gin.Context, s *stats.StatsManager) {
 	allStats, err := s.GetAllStats()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -462,7 +461,7 @@ func getStats(c *gin.Context, s *stats.Stats) {
 	c.JSON(http.StatusOK, allStats)
 }
 
-func getAccountStats(c *gin.Context, s *stats.Stats) {
+func getAccountStats(c *gin.Context, s *stats.StatsManager) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid account_id"})
@@ -534,13 +533,9 @@ func startWorkflow(ctx context.Context, db *sql.DB, eng *engine.Engine, gen *gen
 
 				// 根据 publish_mode 决定下一步
 				if job.PublishMode == "auto" {
-					// 全自动模式：触发发布
-					fmt.Printf("[workflow] job %d generated (auto), triggering publish\n", job.ID)
-					go func(j *queue.Job) {
-						if err := pub.PublishJob(j); err != nil {
-							fmt.Printf("[workflow] publish error: %v\n", err)
-						}
-					}(job)
+					// 全自动模式：job 已更新为 StatusGenerated
+					// Publisher.RunOnce 会自动检测并发布
+					fmt.Printf("[workflow] job %d generated (auto), waiting for publisher\n", job.ID)
 				} else {
 					// 人工审核模式：发送 Webhook 通知
 					fmt.Printf("[workflow] job %d generated (review), sending webhook\n", job.ID)

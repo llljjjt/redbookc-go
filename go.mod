@@ -5,7 +5,7 @@ go 1.21
 require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/playwright-community/playwright-go v0.0.0-20240531135021-5f7e1a1c0e9a
+	github.com/playwright-community/playwright-go v1.0.0
 )
 
 require (

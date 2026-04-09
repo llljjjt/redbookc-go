@@ -130,14 +130,28 @@ This is a real SaaS business. Token credits are a pre-subscription friction that
 
 ---
 
+## User Decisions (2026-04-09)
+
+| Question | Answer |
+|----------|--------|
+| Target users | A+B (Chinese brands + content agencies) |
+| Signal source | 微信公众号 RSS |
+| Human review mode | ADD — separate human-review feature alongside full-auto mode |
+
+**Dual mode confirmed:**
+- **全自动模式：** signal → generate → auto-publish (no human intervention)
+- **人工审核模式：** signal → generate → show to user → user approves → publish
+
+---
+
 ## Next Action for Builder
 
 **Before writing code:**
 
-1. Decide: who is the ACTUAL buyer of this? (Chinese brand? content agency? indie hacker?)
-2. Pick ONE signal source that matches that buyer's actual use case
-3. Design the human-in-the-loop flow
-4. Then start coding
+1. ✅ User confirmed: brands + content agencies as target
+2. ✅ Signal source: 微信公众号 RSS (better cultural fit for Chinese audience)
+3. ✅ Human review: separate feature, full-auto unchanged
+4. Proceed to /plan-eng-review for architecture validation
 
 ---
 

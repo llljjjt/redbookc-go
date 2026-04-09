@@ -48,7 +48,7 @@ func main() {
 	pub := publisher.NewPublisher(db, accMgr, q)
 	wh := webhook.NewWebhookClient(db)
 	eng := engine.NewEngine(db)
-	statsMgr := stats.NewStatsManager(db)
+	statsMgr := stats.NewStats(db)
 
 	// 4. Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
